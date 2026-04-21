@@ -1,3 +1,4 @@
+import inspect
 import math
 from typing import Optional, Tuple
 
@@ -10,6 +11,10 @@ from transformers.models.qwen2.modeling_qwen2 import (
     repeat_kv,
     apply_rotary_pos_emb,
 )
+
+# transformers 4.44 and earlier: rotary_emb(x, seq_len=int), apply_rotary_pos_emb(q, k, cos, sin, position_ids)
+# transformers 4.45+:            rotary_emb(x, position_ids),  apply_rotary_pos_emb(q, k, cos, sin)
+_NEW_ROPE_API = "position_ids" not in inspect.signature(apply_rotary_pos_emb).parameters
 
 
 class AttentionBias(nn.Module):
@@ -98,8 +103,17 @@ class BiasedQwen2Attention(Qwen2Attention):
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
-        cos, sin = self.rotary_emb(value_states, position_ids)
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        if _NEW_ROPE_API:
+            # transformers >= 4.45: position_ids baked into cos/sin
+            cos, sin = self.rotary_emb(value_states, position_ids)
+            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        else:
+            # transformers 4.44 and earlier: seq_len scalar, position_ids passed to apply
+            kv_seq_len = key_states.shape[-2]
+            if past_key_value is not None:
+                kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+            cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
 
         if past_key_value is not None:
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}

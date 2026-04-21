@@ -143,11 +143,17 @@ def run_training(cfg, run_name: Optional[str] = None):
 
     for epoch in range(cfg.training.n_epochs):
         for batch in ppo_trainer.dataloader:
-            query_tensors = list(batch["input_ids"])
+            # Strip left-padding so TRL doesn't mistake pad=EOS tokens for end-of-response
+            query_tensors = [
+                ids[mask.bool()]
+                for ids, mask in zip(batch["input_ids"], batch["attention_mask"])
+            ]
             gold_answers = batch["answers"]
 
-            # Rollout
-            response_tensors = ppo_trainer.generate(query_tensors, **generation_kwargs)
+            # Rollout — return_prompt=False gives response-only tensors
+            response_tensors = ppo_trainer.generate(
+                query_tensors, return_prompt=False, **generation_kwargs
+            )
             responses = tokenizer.batch_decode(response_tensors, skip_special_tokens=True)
 
             rewards = [torch.tensor(r, dtype=torch.float32) for r in gsm8k_reward_fn(responses, gold_answers)]

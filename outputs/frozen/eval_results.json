@@ -1,0 +1,7 @@
+{
+  "accuracy": 0.014,
+  "correct": 7,
+  "total": 500,
+  "mean_reward": 0.20448339999999998,
+  "condition": "frozen"
+}

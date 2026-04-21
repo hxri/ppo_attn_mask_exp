@@ -12,9 +12,9 @@ bias:
 
 ppo:
   learning_rate: 1.0e-4
-  batch_size: 32
-  mini_batch_size: 4
-  gradient_accumulation_steps: 8
+  batch_size: 128
+  mini_batch_size: 16
+  gradient_accumulation_steps: 2
   ppo_epochs: 4
   cliprange: 0.2
   vf_coef: 0.1
@@ -25,11 +25,11 @@ ppo:
 
 training:
   n_epochs: 3
-  max_new_tokens: 256
+  max_new_tokens: 512
   temperature: 0.7
   top_p: 0.9
   seed: 42
-  log_steps: 10
+  log_steps: 1
   save_steps: 100
   eval_steps: 50
   output_dir: outputs

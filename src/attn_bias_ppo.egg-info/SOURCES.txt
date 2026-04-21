@@ -1,0 +1,14 @@
+README.md
+pyproject.toml
+src/attn_bias/__init__.py
+src/attn_bias/analysis.py
+src/attn_bias/config.py
+src/attn_bias/data.py
+src/attn_bias/eval.py
+src/attn_bias/model.py
+src/attn_bias/rewards.py
+src/attn_bias/trainer.py
+src/attn_bias_ppo.egg-info/PKG-INFO
+src/attn_bias_ppo.egg-info/SOURCES.txt
+src/attn_bias_ppo.egg-info/dependency_links.txt
+src/attn_bias_ppo.egg-info/top_level.txt

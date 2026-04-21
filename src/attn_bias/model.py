@@ -128,26 +128,31 @@ class BiasedQwen2Attention(Qwen2Attention):
         # === INJECT LEARNED ATTENTION BIAS ===
         # attn_weights: (batch, n_heads, q_len, kv_len)
         # During prefill q_len == kv_len; during generation q_len == 1.
-        # We must NOT use kv_len for both dims — that broadcasts q_len from 1→kv_len.
-        # Instead index bias rows by position_ids so shape is always (batch, n_heads, q_len, kv_len).
+        # Sequences may exceed max_len — clamp to bias bounds and zero-pad the excess.
         q_len_actual = attn_weights.size(-2)
         kv_len = attn_weights.size(-1)
         n_heads = self.attn_bias_param.shape[0]
         max_len = self.attn_bias_param.shape[1]
         batch = attn_weights.shape[0]
 
+        kv_eff = min(kv_len, max_len)  # how many key positions the bias covers
+
         if position_ids is not None:
-            pos = position_ids.clamp(max=max_len - 1)          # (batch, q_len)
-            bias_kv = self.attn_bias_param[:, :, :kv_len]      # (n_heads, max_len, kv_len)
-            idx = (pos.unsqueeze(1)                             # (batch, 1, q_len)
-                      .unsqueeze(-1)                            # (batch, 1, q_len, 1)
-                      .expand(batch, n_heads, q_len_actual, kv_len))
+            pos = position_ids.clamp(max=max_len - 1)           # (batch, q_len)
+            bias_kv = self.attn_bias_param[:, :, :kv_eff]       # (n_heads, max_len, kv_eff)
+            idx = (pos.unsqueeze(1)
+                      .unsqueeze(-1)
+                      .expand(batch, n_heads, q_len_actual, kv_eff))
             bias = (bias_kv.unsqueeze(0)
                            .expand(batch, -1, -1, -1)
-                           .gather(2, idx))                     # (batch, n_heads, q_len, kv_len)
+                           .gather(2, idx))                      # (batch, n_heads, q_len, kv_eff)
         else:
-            # Fallback for the rare case position_ids is absent (prefill only)
-            bias = self.attn_bias_param[:, :q_len_actual, :kv_len].unsqueeze(0)
+            bias = self.attn_bias_param[:, :q_len_actual, :kv_eff].unsqueeze(0)
+
+        # Zero-pad key dimension for tokens beyond max_len
+        if kv_eff < kv_len:
+            pad = attn_weights.new_zeros(batch, n_heads, q_len_actual, kv_len - kv_eff)
+            bias = torch.cat([bias, pad], dim=-1)
 
         if self.max_norm > 0:
             norms = bias.norm(p="fro", dim=(-2, -1), keepdim=True)

@@ -2,7 +2,7 @@ condition: bias_ppo
 
 model:
   name: Qwen/Qwen2.5-0.5B-Instruct
-  max_len: 512
+  max_len: 1024
   torch_dtype: bfloat16
 
 bias:

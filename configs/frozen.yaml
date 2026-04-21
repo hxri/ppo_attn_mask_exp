@@ -1,0 +1,40 @@
+condition: frozen
+
+model:
+  name: Qwen/Qwen2.5-0.5B-Instruct
+  max_len: 512
+  torch_dtype: bfloat16
+
+bias:
+  init_noise: 0.0
+  shared: false
+  max_norm: 0.0
+
+ppo:
+  learning_rate: 0.0
+  batch_size: 32
+  mini_batch_size: 4
+  gradient_accumulation_steps: 8
+  ppo_epochs: 1        # 1 epoch, value-head only
+  cliprange: 0.2
+  vf_coef: 0.1
+  kl_penalty: kl
+  target_kl: 0.05
+  max_grad_norm: 1.0
+  vf_lr: 1.0e-4
+
+training:
+  n_epochs: 1
+  max_new_tokens: 256
+  temperature: 0.7
+  top_p: 0.9
+  seed: 42
+  log_steps: 10
+  save_steps: 100
+  eval_steps: 50
+  output_dir: outputs
+  wandb_project: attn-bias-ppo
+  wandb_run_name: frozen_qwen0.5b
+
+dataset: gsm8k
+n_eval_samples: 500

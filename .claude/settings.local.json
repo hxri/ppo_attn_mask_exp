@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(chmod +x /Users/hari/research/ppo-attn-mask/experiments/*.sh)"
+    ]
+  }
+}

@@ -1,11 +1,11 @@
 import inspect
 import math
+import types
 from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoModelForCausalLM
 from transformers.models.qwen2.modeling_qwen2 import (
     Qwen2Attention,
     repeat_kv,
@@ -45,7 +45,6 @@ class AttentionBias(nn.Module):
             )
 
         if shared:
-            # Single bias broadcast across all layers (ablation)
             shared_param = _make_param()
             self.biases = nn.ParameterList([shared_param] * n_layers)
         else:
@@ -69,114 +68,108 @@ class AttentionBias(nn.Module):
         return out
 
 
-class BiasedQwen2Attention(Qwen2Attention):
+def _biased_attn_forward(
+    self,
+    hidden_states: torch.Tensor,
+    attention_mask: Optional[torch.Tensor] = None,
+    position_ids: Optional[torch.LongTensor] = None,
+    past_key_value=None,
+    output_attentions: bool = False,
+    use_cache: bool = False,
+    cache_position: Optional[torch.LongTensor] = None,
+    **kwargs,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
     """
-    Qwen2 attention with an additive learned bias injected before softmax.
-    Inherits frozen QKV/O projections; attn_bias_param is the only trainable tensor.
+    Replacement forward for Qwen2Attention that injects self.attn_bias_param
+    before softmax. Assigned via types.MethodType so pretrained weights are
+    never touched — only the bias param is added.
     """
+    bsz, q_len, _ = hidden_states.size()
 
-    def __init__(self, config, layer_idx: int, attn_bias_param: nn.Parameter, max_norm: float = 0.0):
-        super().__init__(config, layer_idx)
-        # Registered as a buffer-like attribute, not an nn.Parameter on this module,
-        # so that optimizer targeting AttentionBias.biases works cleanly.
-        self.attn_bias_param = attn_bias_param
-        self.max_norm = max_norm
+    query_states = self.q_proj(hidden_states)
+    key_states = self.k_proj(hidden_states)
+    value_states = self.v_proj(hidden_states)
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.LongTensor] = None,
-        past_key_value=None,
-        output_attentions: bool = False,
-        use_cache: bool = False,
-        cache_position: Optional[torch.LongTensor] = None,
-        **kwargs,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-        bsz, q_len, _ = hidden_states.size()
+    query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
+    key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
+    value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
 
-        query_states = self.q_proj(hidden_states)
-        key_states = self.k_proj(hidden_states)
-        value_states = self.v_proj(hidden_states)
+    # QK norms present in some Qwen2.5 variants
+    if hasattr(self, "q_norm"):
+        query_states = self.q_norm(query_states)
+    if hasattr(self, "k_norm"):
+        key_states = self.k_norm(key_states)
 
-        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
-
-        if _NEW_ROPE_API:
-            # transformers >= 4.45: position_ids baked into cos/sin
-            cos, sin = self.rotary_emb(value_states, position_ids)
-            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
-        else:
-            # transformers 4.44 and earlier: seq_len scalar, position_ids passed to apply
-            kv_seq_len = key_states.shape[-2]
-            if past_key_value is not None:
-                kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
-            cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
-            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
-
+    if _NEW_ROPE_API:
+        cos, sin = self.rotary_emb(value_states, position_ids)
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+    else:
+        kv_seq_len = key_states.shape[-2]
         if past_key_value is not None:
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+        cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
+        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
 
-        # GQA: expand kv heads to match query heads
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
+    if past_key_value is not None:
+        cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+        key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
 
-        attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+    key_states = repeat_kv(key_states, self.num_key_value_groups)
+    value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        # === INJECT LEARNED ATTENTION BIAS ===
-        # attn_weights: (batch, n_heads, q_len, kv_len)
-        # During prefill q_len == kv_len; during generation q_len == 1.
-        # Sequences may exceed max_len — clamp to bias bounds and zero-pad the excess.
-        q_len_actual = attn_weights.size(-2)
-        kv_len = attn_weights.size(-1)
-        n_heads = self.attn_bias_param.shape[0]
-        max_len = self.attn_bias_param.shape[1]
-        batch = attn_weights.shape[0]
+    attn_weights = torch.matmul(query_states, key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
 
-        kv_eff = min(kv_len, max_len)  # how many key positions the bias covers
+    # === INJECT LEARNED ATTENTION BIAS ===
+    # attn_weights: (batch, n_heads, q_len, kv_len)
+    # During prefill q_len == kv_len; during generation q_len == 1.
+    # Use position_ids to index the correct bias rows — never assume q_len == kv_len.
+    # Sequences longer than max_len get zero bias for the excess keys.
+    q_len_actual = attn_weights.size(-2)
+    kv_len = attn_weights.size(-1)
+    n_heads = self.attn_bias_param.shape[0]
+    max_len = self.attn_bias_param.shape[1]
+    batch = attn_weights.shape[0]
+    kv_eff = min(kv_len, max_len)
 
-        if position_ids is not None:
-            pos = position_ids.clamp(max=max_len - 1)           # (batch, q_len)
-            bias_kv = self.attn_bias_param[:, :, :kv_eff]       # (n_heads, max_len, kv_eff)
-            idx = (pos.unsqueeze(1)
-                      .unsqueeze(-1)
-                      .expand(batch, n_heads, q_len_actual, kv_eff))
-            bias = (bias_kv.unsqueeze(0)
-                           .expand(batch, -1, -1, -1)
-                           .gather(2, idx))                      # (batch, n_heads, q_len, kv_eff)
-        else:
-            bias = self.attn_bias_param[:, :q_len_actual, :kv_eff].unsqueeze(0)
+    if position_ids is not None:
+        pos = position_ids.clamp(max=max_len - 1)          # (batch, q_len)
+        bias_kv = self.attn_bias_param[:, :, :kv_eff]      # (n_heads, max_len, kv_eff)
+        idx = (pos.unsqueeze(1)
+                  .unsqueeze(-1)
+                  .expand(batch, n_heads, q_len_actual, kv_eff))
+        bias = (bias_kv.unsqueeze(0)
+                       .expand(batch, -1, -1, -1)
+                       .gather(2, idx))                     # (batch, n_heads, q_len, kv_eff)
+    else:
+        bias = self.attn_bias_param[:, :q_len_actual, :kv_eff].unsqueeze(0)
 
-        # Zero-pad key dimension for tokens beyond max_len
-        if kv_eff < kv_len:
-            pad = attn_weights.new_zeros(batch, n_heads, q_len_actual, kv_len - kv_eff)
-            bias = torch.cat([bias, pad], dim=-1)
+    if kv_eff < kv_len:
+        pad = attn_weights.new_zeros(batch, n_heads, q_len_actual, kv_len - kv_eff)
+        bias = torch.cat([bias, pad], dim=-1)
 
-        if self.max_norm > 0:
-            norms = bias.norm(p="fro", dim=(-2, -1), keepdim=True)
-            scale = (self.max_norm / norms.clamp(min=1e-8)).clamp(max=1.0)
-            bias = bias * scale
+    if self.attn_bias_max_norm > 0:
+        norms = bias.norm(p="fro", dim=(-2, -1), keepdim=True)
+        scale = (self.attn_bias_max_norm / norms.clamp(min=1e-8)).clamp(max=1.0)
+        bias = bias * scale
 
-        attn_weights = attn_weights + bias
-        # =====================================
+    attn_weights = attn_weights + bias
+    # =====================================
 
-        if attention_mask is not None:
-            causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
-            attn_weights = attn_weights + causal_mask
+    if attention_mask is not None:
+        causal_mask = attention_mask[:, :, :, :key_states.shape[-2]]
+        attn_weights = attn_weights + causal_mask
 
-        attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-        attn_weights = nn.functional.dropout(attn_weights, p=self.attention_dropout, training=self.training)
+    attn_weights = F.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+    attn_weights = F.dropout(attn_weights, p=self.attention_dropout, training=self.training)
 
-        attn_output = torch.matmul(attn_weights, value_states)
-        attn_output = attn_output.transpose(1, 2).contiguous().reshape(bsz, q_len, -1)
-        attn_output = self.o_proj(attn_output)
+    attn_output = torch.matmul(attn_weights, value_states)
+    attn_output = attn_output.transpose(1, 2).contiguous().reshape(bsz, q_len, -1)
+    attn_output = self.o_proj(attn_output)
 
-        if not output_attentions:
-            attn_weights = None
+    if not output_attentions:
+        attn_weights = None
 
-        return attn_output, attn_weights, past_key_value
+    return attn_output, attn_weights, past_key_value
 
 
 def build_biased_model_for_ppo(
@@ -188,10 +181,12 @@ def build_biased_model_for_ppo(
     torch_dtype=torch.bfloat16,
 ):
     """
-    Loads model, freezes all weights, injects trainable attention biases, wraps with
-    trl's value head. Returns (model_with_value_head, attention_bias).
+    Loads model, freezes all weights, monkey-patches each attention layer's forward
+    to inject a learned bias, wraps with trl's value head.
 
-    Only attention_bias.parameters() and model.v_head.parameters() have requires_grad=True.
+    No weight copying — attn_bias_param is set as an attribute on the existing
+    (pretrained) attention module and the forward method is replaced in-place.
+    Only attention_bias.parameters() and model.v_head.parameters() are trainable.
     """
     from trl import AutoModelForCausalLMWithValueHead
 
@@ -200,11 +195,8 @@ def build_biased_model_for_ppo(
         torch_dtype=torch_dtype,
     )
 
-    # Freeze everything
     for param in model.parameters():
         param.requires_grad = False
-
-    # Value head stays trainable (critic, not policy)
     for param in model.v_head.parameters():
         param.requires_grad = True
 
@@ -215,20 +207,12 @@ def build_biased_model_for_ppo(
     attention_bias = AttentionBias(n_layers, n_heads, max_len, init_noise, shared_bias)
 
     for layer_idx, layer in enumerate(model.pretrained_model.model.layers):
-        biased_attn = BiasedQwen2Attention(
-            cfg,
-            layer_idx,
-            attention_bias.biases[layer_idx],
-            max_norm=max_norm,
-        )
-        # Copy frozen weights from original attention (already loaded)
-        biased_attn.load_state_dict(layer.self_attn.state_dict(), strict=False)
-        biased_attn.q_proj = layer.self_attn.q_proj
-        biased_attn.k_proj = layer.self_attn.k_proj
-        biased_attn.v_proj = layer.self_attn.v_proj
-        biased_attn.o_proj = layer.self_attn.o_proj
-        biased_attn.rotary_emb = layer.self_attn.rotary_emb
-        layer.self_attn = biased_attn
+        attn = layer.self_attn
+        # Attach bias param and config directly onto the existing module
+        attn.attn_bias_param = attention_bias.biases[layer_idx]
+        attn.attn_bias_max_norm = max_norm
+        # Replace forward — pretrained weights (q/k/v/o/norms/rope) are untouched
+        attn.forward = types.MethodType(_biased_attn_forward, attn)
 
     return model, attention_bias
 

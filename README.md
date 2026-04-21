@@ -38,12 +38,12 @@ Either outcome is publishable. The interpretability heatmaps are a contribution 
 ## Setup
 
 ```bash
-conda create -n attn-ppo python=3.11
-conda activate attn-ppo
+uv venv --python 3.11
+source .venv/bin/activate
 
-pip install torch==2.3.0 --index-url https://download.pytorch.org/whl/cu121
-pip install -r requirements.txt
-pip install -e .
+uv pip install torch==2.3.0 --index-url https://download.pytorch.org/whl/cu121
+uv pip install -r requirements.txt
+uv pip install -e .
 
 # Pre-download model and dataset (optional, avoids timeouts during training)
 python -c "from transformers import AutoModelForCausalLM; AutoModelForCausalLM.from_pretrained('Qwen/Qwen2.5-0.5B-Instruct')"

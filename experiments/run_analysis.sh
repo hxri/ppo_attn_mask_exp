@@ -1,8 +1,6 @@
 #!/bin/bash
 set -euo pipefail
 
-conda activate attn-ppo
-
 python scripts/analyze.py \
     --checkpoint outputs/bias_ppo/final \
     --model Qwen/Qwen2.5-0.5B-Instruct \

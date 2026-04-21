@@ -40,12 +40,19 @@ def evaluate_gsm8k(
     total = 0
     all_rewards = []
 
+    do_sample = temperature > 0
     gen_kwargs = {
         "max_new_tokens": max_new_tokens,
-        "do_sample": temperature > 0,
-        "temperature": temperature if temperature > 0 else 1.0,
+        "do_sample": do_sample,
         "pad_token_id": tokenizer.pad_token_id,
     }
+    if do_sample:
+        gen_kwargs["temperature"] = temperature
+    else:
+        # Explicitly unset sampling params that Qwen's generation_config ships with,
+        # otherwise transformers warns about top_p/top_k being set with do_sample=False.
+        gen_kwargs["top_p"] = None
+        gen_kwargs["top_k"] = None
 
     for batch in tqdm(loader, desc="Evaluating"):
         input_ids = batch["input_ids"].to(device)

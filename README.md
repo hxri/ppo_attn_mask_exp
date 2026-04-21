@@ -42,10 +42,11 @@ uv venv --python 3.11
 source .venv/bin/activate
 
 # Install PyTorch matching your CUDA driver (check with nvidia-smi)
-# CUDA 12.1:  uv pip install torch --index-url https://download.pytorch.org/whl/cu121
+# Blackwell (sm_120, RTX PRO 6000 / B100 / B200): needs cu128
+# CUDA 12.8:  uv pip install torch --index-url https://download.pytorch.org/whl/cu128
 # CUDA 12.4:  uv pip install torch --index-url https://download.pytorch.org/whl/cu124
-# CUDA 12.6:  uv pip install torch --index-url https://download.pytorch.org/whl/cu126
-uv pip install torch --index-url https://download.pytorch.org/whl/cu124
+# CUDA 12.1:  uv pip install torch --index-url https://download.pytorch.org/whl/cu121
+uv pip install torch --index-url https://download.pytorch.org/whl/cu128
 
 uv pip install -r requirements.txt
 uv pip install -e .

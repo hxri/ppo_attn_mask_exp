@@ -41,7 +41,12 @@ Either outcome is publishable. The interpretability heatmaps are a contribution 
 uv venv --python 3.11
 source .venv/bin/activate
 
-uv pip install torch==2.3.0 --index-url https://download.pytorch.org/whl/cu121
+# Install PyTorch matching your CUDA driver (check with nvidia-smi)
+# CUDA 12.1:  uv pip install torch --index-url https://download.pytorch.org/whl/cu121
+# CUDA 12.4:  uv pip install torch --index-url https://download.pytorch.org/whl/cu124
+# CUDA 12.6:  uv pip install torch --index-url https://download.pytorch.org/whl/cu126
+uv pip install torch --index-url https://download.pytorch.org/whl/cu124
+
 uv pip install -r requirements.txt
 uv pip install -e .
 
